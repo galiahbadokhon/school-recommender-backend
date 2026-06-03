@@ -8,7 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-cconst dbConfig = {
+const dbConfig = {
   host: process.env.DB_HOST || '127.0.0.1',
   port: parseInt(process.env.DB_PORT) || 3306,
   user: process.env.DB_USER || 'root',
