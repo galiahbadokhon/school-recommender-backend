@@ -1,5 +1,5 @@
 const express = require('express');
-const mysql = require('mysql2');
+const { Pool } = require('pg');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
@@ -8,30 +8,14 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const dbConfig = {
-  host: process.env.DB_HOST || '127.0.0.1',
-  port: parseInt(process.env.DB_PORT) || 3306,
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'school_recommender',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  ssl: process.env.DB_HOST ? { rejectUnauthorized: false } : false,
-  connectTimeout: 60000,
-  authPlugins: undefined,
-  authSwitchHandler: undefined,
-};
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL || 'postgresql://school_recommender_user:C4VqE0XntfHl36hbc6XcKBuPjSdvWHUT@dpg-d8g5qtog4nts73bboum0-a.oregon-postgres.render.com/school_recommender',
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
+});
 
-const db = mysql.createPool(dbConfig);
-
-db.getConnection((err, connection) => {
-  if (err) {
-    console.error('Database connection failed:', err);
-    return;
-  }
-  console.log('Connected to MySQL database!');
-  connection.release();
+pool.connect((err) => {
+  if (err) { console.error('Database connection failed:', err); return; }
+  console.log('Connected to PostgreSQL database!');
 });
 
 function getDistance(lat1, lon1, lat2, lon2) {
@@ -44,18 +28,31 @@ function getDistance(lat1, lon1, lat2, lon2) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
 }
 
+const db = {
+  query: (text, params) => pool.query(text.replace(/\?/g, (_, i) => `$${++i}`), params)
+};
+
+// Fix query helper to properly replace ? with $1, $2...
+function q(text, params) {
+  let i = 0;
+  const converted = text.replace(/\?/g, () => `$${++i}`);
+  return pool.query(converted, params);
+}
+
 app.get('/', (req, res) => {
   res.json({ message: 'School Recommender API is running!' });
 });
 
-app.get('/schools', (req, res) => {
-  db.query('SELECT * FROM schools', (err, results) => {
-    if (err) return res.status(500).json({ error: err.message });
-    res.json(results);
-  });
+app.get('/schools', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM schools');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/recommend', (req, res) => {
+app.post('/recommend', async (req, res) => {
   const {
     curriculum, max_distance, budget_max, gender_pref,
     grade_level, home_lat, home_lng,
@@ -63,8 +60,9 @@ app.post('/recommend', (req, res) => {
     activities
   } = req.body;
 
-  db.query('SELECT * FROM schools', (err, schools) => {
-    if (err) return res.status(500).json({ error: err.message });
+  try {
+    const result = await pool.query('SELECT * FROM schools');
+    let schools = result.rows;
 
     let filtered = schools.filter(school => {
       if (curriculum && school.curriculum !== curriculum) return false;
@@ -123,7 +121,9 @@ app.post('/recommend', (req, res) => {
 
     scored.sort((a, b) => b.match_score - a.match_score);
     res.json(scored.slice(0, 10));
-  });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/signup', async (req, res) => {
@@ -131,440 +131,310 @@ app.post('/signup', async (req, res) => {
   if (!name || !email || !password) {
     return res.status(400).json({ error: 'Name, email and password are required' });
   }
-  const hash = await bcrypt.hash(password, 10);
-  db.query(
-    'INSERT INTO users (name, email, password_hash, phone, role) VALUES (?, ?, ?, ?, ?)',
-    [name, email, hash, phone, 'parent'],
-    (err, result) => {
-      if (err) {
-        if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: 'Email already exists' });
-        return res.status(500).json({ error: err.message });
-      }
-      const sessionId = uuidv4();
-      const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-      db.query(
-        'INSERT INTO sessions (session_id, user_id, expires_at) VALUES (?, ?, ?)',
-        [sessionId, result.insertId, expires],
-        (err2) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json({ session_id: sessionId, user: { user_id: result.insertId, name, email, phone } });
-        }
-      );
-    }
-  );
-});
-
-app.post('/login', (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
-
-  db.query('SELECT * FROM users WHERE email = ?', [email], async (err, results) => {
-    if (err) return res.status(500).json({ error: err.message });
-    if (results.length === 0) return res.status(401).json({ error: 'Invalid email or password' });
-
-    const user = results[0];
-    const match = await bcrypt.compare(password, user.password_hash);
-    if (!match) return res.status(401).json({ error: 'Invalid email or password' });
-
+  try {
+    const hash = await bcrypt.hash(password, 10);
+    const result = await q('INSERT INTO users (name, email, password_hash, phone, role) VALUES (?, ?, ?, ?, ?) RETURNING user_id', [name, email, hash, phone, 'parent']);
+    const userId = result.rows[0].user_id;
     const sessionId = uuidv4();
     const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
-    db.query(
-      'INSERT INTO sessions (session_id, user_id, expires_at) VALUES (?, ?, ?)',
-      [sessionId, user.user_id, expires],
-      (err2) => {
-        if (err2) return res.status(500).json({ error: err2.message });
-        res.json({ session_id: sessionId, user: { user_id: user.user_id, name: user.name, email: user.email, phone: user.phone } });
-      }
-    );
-  });
+    await q('INSERT INTO sessions (session_id, user_id, expires_at) VALUES (?, ?, ?)', [sessionId, userId, expires]);
+    res.json({ session_id: sessionId, user: { user_id: userId, name, email, phone } });
+  } catch (err) {
+    if (err.code === '23505') return res.status(400).json({ error: 'Email already exists' });
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/logout', (req, res) => {
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+  try {
+    const result = await q('SELECT * FROM users WHERE email = ?', [email]);
+    if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid email or password' });
+    const user = result.rows[0];
+    const match = await bcrypt.compare(password, user.password_hash);
+    if (!match) return res.status(401).json({ error: 'Invalid email or password' });
+    const sessionId = uuidv4();
+    const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await q('INSERT INTO sessions (session_id, user_id, expires_at) VALUES (?, ?, ?)', [sessionId, user.user_id, expires]);
+    res.json({ session_id: sessionId, user: { user_id: user.user_id, name: user.name, email: user.email, phone: user.phone } });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/logout', async (req, res) => {
   const { session_id } = req.body;
-  db.query('DELETE FROM sessions WHERE session_id = ?', [session_id], () => {
-    res.json({ success: true });
-  });
+  await q('DELETE FROM sessions WHERE session_id = ?', [session_id]);
+  res.json({ success: true });
 });
 
-app.get('/me', (req, res) => {
+app.get('/me', async (req, res) => {
   const session_id = req.headers['x-session-id'];
   if (!session_id) return res.status(401).json({ error: 'No session' });
-
-  db.query(
-    'SELECT u.user_id, u.name, u.email, u.phone FROM sessions s JOIN users u ON s.user_id = u.user_id WHERE s.session_id = ? AND s.expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err) return res.status(500).json({ error: err.message });
-      if (results.length === 0) return res.status(401).json({ error: 'Invalid or expired session' });
-      res.json(results[0]);
-    }
-  );
+  try {
+    const result = await q(
+      'SELECT u.user_id, u.name, u.email, u.phone FROM sessions s JOIN users u ON s.user_id = u.user_id WHERE s.session_id = ? AND s.expires_at > NOW()',
+      [session_id]
+    );
+    if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid or expired session' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/favorites', (req, res) => {
+async function getUserId(session_id) {
+  const result = await q('SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()', [session_id]);
+  if (result.rows.length === 0) return null;
+  return result.rows[0].user_id;
+}
+
+app.post('/favorites', async (req, res) => {
   const { school_id } = req.body;
   const session_id = req.headers['x-session-id'];
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-      db.query(
-        'INSERT IGNORE INTO favorites (user_id, school_id) VALUES (?, ?)',
-        [user_id, school_id],
-        (err2) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json({ success: true });
-        }
-      );
-    }
-  );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    await q('INSERT INTO favorites (user_id, school_id) VALUES (?, ?) ON CONFLICT DO NOTHING', [user_id, school_id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.delete('/favorites/:school_id', (req, res) => {
+app.delete('/favorites/:school_id', async (req, res) => {
   const { school_id } = req.params;
   const session_id = req.headers['x-session-id'];
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-      db.query(
-        'DELETE FROM favorites WHERE user_id = ? AND school_id = ?',
-        [user_id, school_id],
-        (err2) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json({ success: true });
-        }
-      );
-    }
-  );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    await q('DELETE FROM favorites WHERE user_id = ? AND school_id = ?', [user_id, school_id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get('/favorites', (req, res) => {
+app.get('/favorites', async (req, res) => {
   const session_id = req.headers['x-session-id'];
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-      db.query(
-        `SELECT s.*, f.created_at as favorited_at 
-         FROM favorites f 
-         JOIN schools s ON f.school_id = s.school_id 
-         WHERE f.user_id = ?
-         ORDER BY f.created_at DESC`,
-        [user_id],
-        (err2, schools) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json(schools);
-        }
-      );
-    }
-  );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    const result = await q(
+      'SELECT s.*, f.created_at as favorited_at FROM favorites f JOIN schools s ON f.school_id = s.school_id WHERE f.user_id = ? ORDER BY f.created_at DESC',
+      [user_id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/preferences', (req, res) => {
+app.post('/preferences', async (req, res) => {
   const session_id = req.headers['x-session-id'];
   const { curriculum, grade, budget, weight_academics, weight_distance, weight_fees } = req.body;
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-      db.query(
-        `INSERT INTO preferences (user_id, curriculum_type, grade_level, budget_max, weight_academics, weight_distance, weight_fees)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
-         ON DUPLICATE KEY UPDATE
-         curriculum_type=VALUES(curriculum_type), grade_level=VALUES(grade_level),
-         budget_max=VALUES(budget_max), weight_academics=VALUES(weight_academics),
-         weight_distance=VALUES(weight_distance), weight_fees=VALUES(weight_fees),
-         updated_at=CURRENT_TIMESTAMP`,
-        [user_id, curriculum, grade, budget, weight_academics, weight_distance, weight_fees],
-        (err2) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json({ success: true });
-        }
-      );
-    }
-  );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    await q(
+      `INSERT INTO preferences (user_id, curriculum_type, grade_level, budget_max, weight_academics, weight_distance, weight_fees)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT (user_id) DO UPDATE SET
+       curriculum_type=EXCLUDED.curriculum_type, grade_level=EXCLUDED.grade_level,
+       budget_max=EXCLUDED.budget_max, weight_academics=EXCLUDED.weight_academics,
+       weight_distance=EXCLUDED.weight_distance, weight_fees=EXCLUDED.weight_fees,
+       updated_at=CURRENT_TIMESTAMP`,
+      [user_id, curriculum, grade, budget, weight_academics, weight_distance, weight_fees]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get('/preferences', (req, res) => {
+app.get('/preferences', async (req, res) => {
   const session_id = req.headers['x-session-id'];
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-      db.query(
-        'SELECT * FROM preferences WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1',
-        [user_id],
-        (err2, prefs) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json(prefs[0] || null);
-        }
-      );
-    }
-  );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    const result = await q('SELECT * FROM preferences WHERE user_id = ? ORDER BY updated_at DESC LIMIT 1', [user_id]);
+    res.json(result.rows[0] || null);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/messages', (req, res) => {
+app.post('/messages', async (req, res) => {
   const session_id = req.headers['x-session-id'];
   const { school_id, content } = req.body;
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-      db.query(
-        'INSERT INTO messages (user_id, school_id, content, sender) VALUES (?, ?, ?, ?)',
-        [user_id, school_id, content, 'parent'],
-        (err2, result) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json({ success: true, message_id: result.insertId });
-        }
-      );
-    }
-  );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    const result = await q(
+      'INSERT INTO messages (user_id, school_id, content, sender) VALUES (?, ?, ?, ?) RETURNING message_id',
+      [user_id, school_id, content, 'parent']
+    );
+    res.json({ success: true, message_id: result.rows[0].message_id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get('/conversations', (req, res) => {
+app.get('/conversations', async (req, res) => {
   const session_id = req.headers['x-session-id'];
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-      db.query(
-        `SELECT s.school_id, s.name_en, s.district, s.curriculum,
-          (SELECT content FROM messages WHERE user_id = ? AND school_id = s.school_id ORDER BY created_at DESC LIMIT 1) as last_message,
-          (SELECT created_at FROM messages WHERE user_id = ? AND school_id = s.school_id ORDER BY created_at DESC LIMIT 1) as last_time,
-          (SELECT COUNT(*) FROM messages WHERE user_id = ? AND school_id = s.school_id AND is_read = FALSE AND sender = 'school') as unread
-         FROM schools s
-         WHERE s.school_id IN (SELECT DISTINCT school_id FROM messages WHERE user_id = ?)
-         ORDER BY last_time DESC`,
-        [user_id, user_id, user_id, user_id],
-        (err2, rows) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json(rows);
-        }
-      );
-    }
-  );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    const result = await q(
+      `SELECT s.school_id, s.name_en, s.district, s.curriculum,
+        (SELECT content FROM messages WHERE user_id = ? AND school_id = s.school_id ORDER BY created_at DESC LIMIT 1) as last_message,
+        (SELECT created_at FROM messages WHERE user_id = ? AND school_id = s.school_id ORDER BY created_at DESC LIMIT 1) as last_time,
+        (SELECT COUNT(*) FROM messages WHERE user_id = ? AND school_id = s.school_id AND is_read = FALSE AND sender = 'school') as unread
+       FROM schools s
+       WHERE s.school_id IN (SELECT DISTINCT school_id FROM messages WHERE user_id = ?)
+       ORDER BY last_time DESC`,
+      [user_id, user_id, user_id, user_id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get('/messages/:school_id', (req, res) => {
+app.get('/messages/:school_id', async (req, res) => {
   const session_id = req.headers['x-session-id'];
   const { school_id } = req.params;
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-      db.query(
-        'SELECT * FROM messages WHERE user_id = ? AND school_id = ? ORDER BY created_at ASC',
-        [user_id, school_id],
-        (err2, messages) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json(messages);
-        }
-      );
-    }
-  );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    const result = await q(
+      'SELECT * FROM messages WHERE user_id = ? AND school_id = ? ORDER BY created_at ASC',
+      [user_id, school_id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/meetings', (req, res) => {
+app.post('/meetings', async (req, res) => {
   const session_id = req.headers['x-session-id'];
   const { school_id, meeting_type, meeting_date, meeting_time, notes } = req.body;
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-      db.query(
-        'INSERT INTO meetings (user_id, school_id, meeting_type, meeting_date, meeting_time, notes) VALUES (?, ?, ?, ?, ?, ?)',
-        [user_id, school_id, meeting_type, meeting_date, meeting_time, notes],
-        (err2, result) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json({ success: true, meeting_id: result.insertId });
-        }
-      );
-    }
-  );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    const result = await q(
+      'INSERT INTO meetings (user_id, school_id, meeting_type, meeting_date, meeting_time, notes) VALUES (?, ?, ?, ?, ?, ?) RETURNING meeting_id',
+      [user_id, school_id, meeting_type, meeting_date, meeting_time, notes]
+    );
+    res.json({ success: true, meeting_id: result.rows[0].meeting_id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get('/meetings', (req, res) => {
+app.get('/meetings', async (req, res) => {
   const session_id = req.headers['x-session-id'];
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-      db.query(
-        `SELECT m.*, s.name_en as school_name, s.district 
-         FROM meetings m 
-         JOIN schools s ON m.school_id = s.school_id 
-         WHERE m.user_id = ? 
-         ORDER BY m.meeting_date ASC, m.meeting_time ASC`,
-        [user_id],
-        (err2, meetings) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json(meetings);
-        }
-      );
-    }
-  );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    const result = await q(
+      `SELECT m.*, s.name_en as school_name, s.district 
+       FROM meetings m 
+       JOIN schools s ON m.school_id = s.school_id 
+       WHERE m.user_id = ? 
+       ORDER BY m.meeting_date ASC, m.meeting_time ASC`,
+      [user_id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.put('/meetings/:meeting_id/cancel', (req, res) => {
+app.put('/meetings/:meeting_id/cancel', async (req, res) => {
   const session_id = req.headers['x-session-id'];
   const { meeting_id } = req.params;
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-      db.query(
-        'UPDATE meetings SET status = ? WHERE meeting_id = ? AND user_id = ?',
-        ['cancelled', meeting_id, user_id],
-        (err2) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json({ success: true });
-        }
-      );
-    }
-  );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    await q('UPDATE meetings SET status = ? WHERE meeting_id = ? AND user_id = ?', ['cancelled', meeting_id, user_id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get('/posts', (req, res) => {
+app.get('/posts', async (req, res) => {
   const session_id = req.headers['x-session-id'];
+  try {
+    const result = await pool.query(
+      `SELECT p.*, s.name_en as school_name, s.curriculum, s.district
+       FROM posts p
+       JOIN schools s ON p.school_id = s.school_id
+       ORDER BY p.created_at DESC`
+    );
+    const posts = result.rows;
 
-  db.query(
-    `SELECT p.*, s.name_en as school_name, s.curriculum, s.district
-     FROM posts p
-     JOIN schools s ON p.school_id = s.school_id
-     ORDER BY p.created_at DESC`,
-    (err, posts) => {
-      if (err) return res.status(500).json({ error: err.message });
+    if (!session_id) return res.json(posts.map(p => ({ ...p, liked: false })));
 
-      if (!session_id) return res.json(posts.map(p => ({ ...p, liked: false })));
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.json(posts.map(p => ({ ...p, liked: false })));
 
-      db.query(
-        'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-        [session_id],
-        (err2, results) => {
-          if (err2 || results.length === 0) return res.json(posts.map(p => ({ ...p, liked: false })));
-          const user_id = results[0].user_id;
-          db.query(
-            'SELECT post_id FROM post_likes WHERE user_id = ?',
-            [user_id],
-            (err3, likes) => {
-              if (err3) return res.json(posts.map(p => ({ ...p, liked: false })));
-              const likedIds = new Set(likes.map(l => l.post_id));
-              res.json(posts.map(p => ({ ...p, liked: likedIds.has(p.post_id) })));
-            }
-          );
-        }
-      );
-    }
-  );
+    const likes = await q('SELECT post_id FROM post_likes WHERE user_id = ?', [user_id]);
+    const likedIds = new Set(likes.rows.map(l => l.post_id));
+    res.json(posts.map(p => ({ ...p, liked: likedIds.has(p.post_id) })));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/posts/:post_id/like', (req, res) => {
+app.post('/posts/:post_id/like', async (req, res) => {
   const session_id = req.headers['x-session-id'];
   const { post_id } = req.params;
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-
-      db.query(
-        'SELECT like_id FROM post_likes WHERE post_id = ? AND user_id = ?',
-        [post_id, user_id],
-        (err2, existing) => {
-          if (existing && existing.length > 0) {
-            db.query('DELETE FROM post_likes WHERE post_id = ? AND user_id = ?', [post_id, user_id]);
-            db.query('UPDATE posts SET likes = likes - 1 WHERE post_id = ?', [post_id]);
-            res.json({ liked: false });
-          } else {
-            db.query('INSERT INTO post_likes (post_id, user_id) VALUES (?, ?)', [post_id, user_id]);
-            db.query('UPDATE posts SET likes = likes + 1 WHERE post_id = ?', [post_id]);
-            res.json({ liked: true });
-          }
-        }
-      );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    const existing = await q('SELECT like_id FROM post_likes WHERE post_id = ? AND user_id = ?', [post_id, user_id]);
+    if (existing.rows.length > 0) {
+      await q('DELETE FROM post_likes WHERE post_id = ? AND user_id = ?', [post_id, user_id]);
+      await q('UPDATE posts SET likes = likes - 1 WHERE post_id = ?', [post_id]);
+      res.json({ liked: false });
+    } else {
+      await q('INSERT INTO post_likes (post_id, user_id) VALUES (?, ?)', [post_id, user_id]);
+      await q('UPDATE posts SET likes = likes + 1 WHERE post_id = ?', [post_id]);
+      res.json({ liked: true });
     }
-  );
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.post('/activities', (req, res) => {
+app.post('/activities', async (req, res) => {
   const session_id = req.headers['x-session-id'];
   const { activities } = req.body;
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-      db.query(
-        'UPDATE users SET activities = ? WHERE user_id = ?',
-        [JSON.stringify(activities), user_id],
-        (err2) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          res.json({ success: true });
-        }
-      );
-    }
-  );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    await q('UPDATE users SET activities = ? WHERE user_id = ?', [JSON.stringify(activities), user_id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-app.get('/activities', (req, res) => {
+app.get('/activities', async (req, res) => {
   const session_id = req.headers['x-session-id'];
-
-  db.query(
-    'SELECT user_id FROM sessions WHERE session_id = ? AND expires_at > NOW()',
-    [session_id],
-    (err, results) => {
-      if (err || results.length === 0) return res.status(401).json({ error: 'Unauthorized' });
-      const user_id = results[0].user_id;
-      db.query(
-        'SELECT activities FROM users WHERE user_id = ?',
-        [user_id],
-        (err2, rows) => {
-          if (err2) return res.status(500).json({ error: err2.message });
-          const activities = rows[0]?.activities ? JSON.parse(rows[0].activities) : [];
-          res.json(activities);
-        }
-      );
-    }
-  );
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    const result = await q('SELECT activities FROM users WHERE user_id = ?', [user_id]);
+    const activities = result.rows[0]?.activities ? JSON.parse(result.rows[0].activities) : [];
+    res.json(activities);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.listen(process.env.PORT || 3000, () => {
