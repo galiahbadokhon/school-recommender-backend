@@ -437,6 +437,177 @@ app.get('/activities', async (req, res) => {
   }
 });
 
+// School signup
+app.post('/school/signup', async (req, res) => {
+  const { school_id, email, password, phone } = req.body;
+  if (!school_id || !email || !password) {
+    return res.status(400).json({ error: 'School ID, email and password are required' });
+  }
+  try {
+    const hash = await bcrypt.hash(password, 10);
+    await q('UPDATE schools SET email = ?, password_hash = ?, phone = ? WHERE school_id = ?', [email, hash, phone, school_id]);
+    const sessionId = uuidv4();
+    const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await q('INSERT INTO school_sessions (session_id, school_id, expires_at) VALUES (?, ?, ?)', [sessionId, school_id, expires]);
+    const school = await q('SELECT * FROM schools WHERE school_id = ?', [school_id]);
+    res.json({ session_id: sessionId, school: school.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// School login
+app.post('/school/login', async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+  try {
+    const result = await q('SELECT * FROM schools WHERE email = ?', [email]);
+    if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid email or password' });
+    const school = result.rows[0];
+    const match = await bcrypt.compare(password, school.password_hash);
+    if (!match) return res.status(401).json({ error: 'Invalid email or password' });
+    const sessionId = uuidv4();
+    const expires = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    await q('INSERT INTO school_sessions (session_id, school_id, expires_at) VALUES (?, ?, ?)', [sessionId, school.school_id, expires]);
+    res.json({ session_id: sessionId, school });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get school session
+async function getSchoolId(session_id) {
+  const result = await q('SELECT school_id FROM school_sessions WHERE session_id = ? AND expires_at > NOW()', [session_id]);
+  if (result.rows.length === 0) return null;
+  return result.rows[0].school_id;
+}
+
+// Get school dashboard stats
+app.get('/school/dashboard', async (req, res) => {
+  const session_id = req.headers['x-school-session'];
+  try {
+    const school_id = await getSchoolId(session_id);
+    if (!school_id) return res.status(401).json({ error: 'Unauthorized' });
+
+    const [school, messages, meetings, enrollments] = await Promise.all([
+      q('SELECT * FROM schools WHERE school_id = ?', [school_id]),
+      q('SELECT COUNT(*) as count FROM messages WHERE school_id = ?', [school_id]),
+      q('SELECT COUNT(*) as count FROM meetings WHERE school_id = ?', [school_id]),
+      q('SELECT COUNT(*) as count FROM enrollments WHERE school_id = ?', [school_id]),
+    ]);
+
+    res.json({
+      school: school.rows[0],
+      stats: {
+        messages: messages.rows[0].count,
+        meetings: meetings.rows[0].count,
+        enrollments: enrollments.rows[0].count,
+      }
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get school leads (parents who messaged or booked)
+app.get('/school/leads', async (req, res) => {
+  const session_id = req.headers['x-school-session'];
+  try {
+    const school_id = await getSchoolId(session_id);
+    if (!school_id) return res.status(401).json({ error: 'Unauthorized' });
+
+    const result = await q(`
+      SELECT DISTINCT u.user_id, u.name, u.email, u.phone,
+        (SELECT created_at FROM messages WHERE user_id = u.user_id AND school_id = ? ORDER BY created_at DESC LIMIT 1) as last_message,
+        (SELECT meeting_date FROM meetings WHERE user_id = u.user_id AND school_id = ? ORDER BY created_at DESC LIMIT 1) as meeting_date,
+        (SELECT status FROM meetings WHERE user_id = u.user_id AND school_id = ? ORDER BY created_at DESC LIMIT 1) as meeting_status
+      FROM users u
+      WHERE u.user_id IN (
+        SELECT DISTINCT user_id FROM messages WHERE school_id = ?
+        UNION
+        SELECT DISTINCT user_id FROM meetings WHERE school_id = ?
+      )
+      ORDER BY last_message DESC NULLS LAST
+    `, [school_id, school_id, school_id, school_id, school_id]);
+
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Confirm enrollment with referral code
+app.post('/school/confirm-enrollment', async (req, res) => {
+  const session_id = req.headers['x-school-session'];
+  const { code, tuition_amount } = req.body;
+  try {
+    const school_id = await getSchoolId(session_id);
+    if (!school_id) return res.status(401).json({ error: 'Unauthorized' });
+
+    const codeResult = await q('SELECT * FROM referral_codes WHERE code = ? AND school_id = ? AND status = ?', [code, school_id, 'pending']);
+    if (codeResult.rows.length === 0) return res.status(404).json({ error: 'Invalid or already used code' });
+
+    const referral = codeResult.rows[0];
+    const commission_rate = 0.04;
+    const commission_amount = Math.round(tuition_amount * commission_rate);
+
+    await q('UPDATE referral_codes SET status = ? WHERE code_id = ?', ['used', referral.code_id]);
+    await q(
+      'INSERT INTO enrollments (code_id, school_id, user_id, tuition_amount, commission_rate, commission_amount) VALUES (?, ?, ?, ?, ?, ?)',
+      [referral.code_id, school_id, referral.user_id, tuition_amount, commission_rate, commission_amount]
+    );
+
+    const parent = await q('SELECT name, email, phone FROM users WHERE user_id = ?', [referral.user_id]);
+    res.json({ success: true, commission_amount, parent: parent.rows[0] });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Generate referral code when meeting is booked
+app.post('/referral/generate', async (req, res) => {
+  const session_id = req.headers['x-session-id'];
+  const { meeting_id, school_id } = req.body;
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+
+    const code = 'MDR-' + Math.random().toString(36).substring(2, 6).toUpperCase();
+    await q('INSERT INTO referral_codes (code, meeting_id, user_id, school_id) VALUES (?, ?, ?, ?)', [code, meeting_id, user_id, school_id]);
+    res.json({ code });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get referral code for a meeting
+app.get('/referral/:meeting_id', async (req, res) => {
+  const session_id = req.headers['x-session-id'];
+  const { meeting_id } = req.params;
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    const result = await q('SELECT code FROM referral_codes WHERE meeting_id = ? AND user_id = ?', [meeting_id, user_id]);
+    res.json(result.rows[0] || null);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update school profile
+app.put('/school/profile', async (req, res) => {
+  const session_id = req.headers['x-school-session'];
+  const { bio, phone, fees_min, fees_max } = req.body;
+  try {
+    const school_id = await getSchoolId(session_id);
+    if (!school_id) return res.status(401).json({ error: 'Unauthorized' });
+    await q('UPDATE schools SET bio = ?, phone = ?, fees_min = ?, fees_max = ? WHERE school_id = ?', [bio, phone, fees_min, fees_max, school_id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(process.env.PORT || 3000, () => {
   console.log('Server running on port', process.env.PORT || 3000);
 });
