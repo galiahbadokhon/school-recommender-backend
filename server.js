@@ -608,6 +608,20 @@ app.put('/school/profile', async (req, res) => {
   }
 });
 
+// School adds a post
+app.post('/school/post', async (req, res) => {
+  const session_id = req.headers['x-school-session'];
+  const { caption, media_url, media_type } = req.body;
+  try {
+    const school_id = await getSchoolId(session_id);
+    if (!school_id) return res.status(401).json({ error: 'Unauthorized' });
+    await q('INSERT INTO posts (school_id, caption, media_url, media_type) VALUES (?, ?, ?, ?)', [school_id, caption, media_url, media_type || 'image']);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(process.env.PORT || 3000, () => {
   console.log('Server running on port', process.env.PORT || 3000);
 });
