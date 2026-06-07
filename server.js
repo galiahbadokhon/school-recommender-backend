@@ -622,6 +622,27 @@ app.post('/school/post', async (req, res) => {
   }
 });
 
+// Get all referral codes for a parent
+app.get('/referral/my-codes', async (req, res) => {
+  const session_id = req.headers['x-session-id'];
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    const result = await q(`
+      SELECT r.code, r.status, r.created_at,
+             s.name_en as school_name, s.district,
+             m.meeting_date, m.meeting_type
+      FROM referral_codes r
+      JOIN schools s ON r.school_id = s.school_id
+      LEFT JOIN meetings m ON r.meeting_id = m.meeting_id
+      WHERE r.user_id = ?
+      ORDER BY r.created_at DESC
+    `, [user_id]);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 app.listen(process.env.PORT || 3000, () => {
   console.log('Server running on port', process.env.PORT || 3000);
 });
