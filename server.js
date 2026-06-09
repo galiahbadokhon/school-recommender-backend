@@ -526,6 +526,48 @@ app.get('/referral/:meeting_id', async (req, res) => {
   }
 });
 
+// Save parent SEN needs
+app.post('/sen/parent', async (req, res) => {
+  const session_id = req.headers['x-session-id'];
+  const { sen_needs } = req.body;
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    await q('UPDATE users SET sen_needs = ? WHERE user_id = ?', [JSON.stringify(sen_needs), user_id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get parent SEN needs
+app.get('/sen/parent', async (req, res) => {
+  const session_id = req.headers['x-session-id'];
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    const result = await q('SELECT sen_needs FROM users WHERE user_id = ?', [user_id]);
+    const sen_needs = result.rows[0]?.sen_needs ? JSON.parse(result.rows[0].sen_needs) : [];
+    res.json(sen_needs);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Save school SEN support
+app.post('/sen/school', async (req, res) => {
+  const session_id = req.headers['x-school-session'];
+  const { sen_support, has_sen } = req.body;
+  try {
+    const school_id = await getSchoolId(session_id);
+    if (!school_id) return res.status(401).json({ error: 'Unauthorized' });
+    await q('UPDATE schools SET sen_support = ?, has_sen = ? WHERE school_id = ?', [JSON.stringify(sen_support), has_sen, school_id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(process.env.PORT || 3000, () => {
   console.log('Server running on port', process.env.PORT || 3000);
 });
