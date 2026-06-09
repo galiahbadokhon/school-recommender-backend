@@ -48,41 +48,85 @@ app.get('/schools', async (req, res) => {
 });
 
 app.post('/recommend', async (req, res) => {
-  const { curriculum, max_distance, budget_max, gender_pref, grade_level, home_lat, home_lng, weight_academics, weight_distance, weight_fees, activities } = req.body;
+  const { curriculum, max_distance, budget_max, gender_pref, grade_level, home_lat, home_lng, weight_academics, weight_distance, weight_fees, activities, sen_needs } = req.body;
   try {
     const result = await pool.query('SELECT * FROM schools');
     let schools = result.rows;
+
     let filtered = schools.filter(school => {
       if (curriculum && school.curriculum !== curriculum) return false;
-      if (budget_max && school.fees_min > budget_max) return false;
-      if (gender_pref && school.gender_policy !== gender_pref) return false;
+      if (budget_max && school.fees_min && parseInt(school.fees_min) > parseInt(budget_max)) return false;      if (gender_pref && school.gender_policy !== gender_pref) return false;
       return true;
     });
+
     let scored = filtered.map(school => {
       let distanceScore = 0;
       if (home_lat && home_lng && school.latitude && school.longitude) {
-        const km = getDistance(home_lat, home_lng, school.latitude, school.longitude);
+        const km = getDistance(home_lat, home_lng, parseFloat(school.latitude), parseFloat(school.longitude));
         distanceScore = Math.max(0, 100 - (km / (max_distance || 20)) * 100);
       }
+
       let feesScore = 0;
-      if (school.fees_min && budget_max) feesScore = Math.max(0, 100 - (school.fees_min / budget_max) * 100);
-      let academicsScore = school.rating ? school.rating * 20 : 50;
+      if (school.fees_min && budget_max) {
+        feesScore = Math.max(0, 100 - (school.fees_min / budget_max) * 100);
+      }
+
+      let academicsScore = school.rating ? parseFloat(school.rating) * 20 : 50;
+
       let activitiesScore = 0;
       if (activities && activities.length > 0 && school.activities) {
         const schoolActivities = school.activities.toLowerCase();
         const matches = activities.filter(a => schoolActivities.includes(a.toLowerCase()));
         activitiesScore = (matches.length / activities.length) * 100;
       }
-      let score = (academicsScore * (weight_academics || 0.30)) + (distanceScore * (weight_distance || 0.25)) + (feesScore * (weight_fees || 0.20)) + (activitiesScore * 0.15);
+
+      let senScore = 0;
+      if (sen_needs && sen_needs.length > 0) {
+        if (school.has_sen && school.sen_support) {
+          const schoolSen = JSON.parse(school.sen_support);
+          const matches = sen_needs.filter(n => schoolSen.includes(n));
+          senScore = (matches.length / sen_needs.length) * 100;
+        }
+      }
+
+      const wAcademics = parseFloat(weight_academics) || 0.30;
+      const wDistance = parseFloat(weight_distance) || 0.25;
+      const wFees = parseFloat(weight_fees) || 0.20;
+      const wActivities = 0.15;
+      const wSen = sen_needs && sen_needs.length > 0 ? 0.10 : 0;
+      const wScale = 1 / (wAcademics + wDistance + wFees + wActivities + wSen);
+
+      let score = (
+        (academicsScore * wAcademics) +
+        (distanceScore * wDistance) +
+        (feesScore * wFees) +
+        (activitiesScore * wActivities) +
+        (senScore * wSen)
+      ) * wScale;
+
       return {
-        school_id: school.school_id, name: school.name_en, curriculum: school.curriculum,
-        district: school.district, fees_min: school.fees_min, fees_max: school.fees_max,
-        rating: school.rating, language: school.language, grades_offered: school.grades_offered,
-        university_pathway: school.university_pathway, website: school.website,
-        bus_service: school.bus_service, counseling: school.counseling, special_needs: school.special_needs,
-        latitude: school.latitude, longitude: school.longitude, match_score: Math.round(score),
+        school_id: school.school_id,
+        name: school.name_en,
+        curriculum: school.curriculum,
+        district: school.district,
+        fees_min: school.fees_min,
+        fees_max: school.fees_max,
+        rating: school.rating,
+        language: school.language,
+        grades_offered: school.grades_offered,
+        university_pathway: school.university_pathway,
+        website: school.website,
+        bus_service: school.bus_service,
+        counseling: school.counseling,
+        special_needs: school.special_needs,
+        has_sen: school.has_sen,
+        sen_support: school.sen_support,
+        latitude: school.latitude,
+        longitude: school.longitude,
+        match_score: Math.min(99, Math.round(score)),
       };
     });
+
     scored.sort((a, b) => b.match_score - a.match_score);
     res.json(scored.slice(0, 10));
   } catch (err) {
