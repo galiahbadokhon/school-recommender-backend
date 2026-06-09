@@ -286,6 +286,7 @@ app.put('/meetings/:meeting_id/cancel', async (req, res) => {
     const user_id = await getUserId(session_id);
     if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
     await q('UPDATE meetings SET status = ? WHERE meeting_id = ? AND user_id = ?', ['cancelled', meeting_id, user_id]);
+    await q('DELETE FROM referral_codes WHERE meeting_id = ? AND user_id = ?', [meeting_id, user_id]);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
