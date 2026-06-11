@@ -611,6 +611,28 @@ app.post('/sen/school', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+// Waitlist signup
+app.post('/waitlist', async (req, res) => {
+  const { email, name, type } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email is required' });
+  try {
+    await q('INSERT INTO waitlist (email, name, type) VALUES (?, ?, ?)', [email, name, type || 'parent']);
+    res.json({ success: true });
+  } catch (err) {
+    if (err.code === '23505') return res.status(400).json({ error: 'You are already on the waitlist!' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get waitlist count
+app.get('/waitlist/count', async (req, res) => {
+  try {
+    const result = await q('SELECT COUNT(*) as count FROM waitlist', []);
+    res.json({ count: result.rows[0].count });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 app.listen(process.env.PORT || 3000, () => {
   console.log('Server running on port', process.env.PORT || 3000);
