@@ -667,6 +667,27 @@ app.put('/reviews/:id/approve', async (req, res) => {
   }
 });
 
+// Get all reviews (admin)
+app.get('/reviews/all', async (req, res) => {
+  try {
+    const result = await q('SELECT * FROM app_reviews ORDER BY created_at DESC', []);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete review
+app.delete('/reviews/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await q('DELETE FROM app_reviews WHERE id = ?', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(process.env.PORT || 3000, () => {
   console.log('Server running on port', process.env.PORT || 3000);
 });
