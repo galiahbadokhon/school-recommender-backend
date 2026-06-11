@@ -634,6 +634,39 @@ app.get('/waitlist/count', async (req, res) => {
   }
 });
 
+// Submit app review
+app.post('/reviews', async (req, res) => {
+  const { name, rating, comment, type } = req.body;
+  if (!name || !rating || !comment) return res.status(400).json({ error: 'All fields are required' });
+  try {
+    await q('INSERT INTO app_reviews (name, rating, comment, type) VALUES (?, ?, ?, ?)', [name, rating, comment, type || 'parent']);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get approved reviews
+app.get('/reviews', async (req, res) => {
+  try {
+    const result = await q('SELECT * FROM app_reviews WHERE approved = TRUE ORDER BY created_at DESC', []);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Approve review (admin only)
+app.put('/reviews/:id/approve', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await q('UPDATE app_reviews SET approved = TRUE WHERE id = ?', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(process.env.PORT || 3000, () => {
   console.log('Server running on port', process.env.PORT || 3000);
 });
