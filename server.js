@@ -689,6 +689,55 @@ app.delete('/reviews/:id', async (req, res) => {
   }
 });
 
+// One-time school rename endpoint
+app.get('/admin/rename-schools', async (req, res) => {
+  const NAMES = [
+    { en: 'Greenfield Academy', ar: 'أكاديمية غرينفيلد' },
+    { en: 'Riverside International', ar: 'مدرسة ريفرسايد الدولية' },
+    { en: 'Oakwood British School', ar: 'مدرسة أوكوود البريطانية' },
+    { en: 'Elmwood Academy', ar: 'أكاديمية إلموود' },
+    { en: 'Sunrise International', ar: 'مدرسة صنرايز الدولية' },
+    { en: 'Maplewood School', ar: 'مدرسة مابلوود' },
+    { en: 'Horizon Academy', ar: 'أكاديمية هورايزون' },
+    { en: 'Cedarwood International', ar: 'مدرسة سيدارووود الدولية' },
+    { en: 'Pinehurst Academy', ar: 'أكاديمية باينهيرست' },
+    { en: 'Willowbrook School', ar: 'مدرسة ويلوبروك' },
+    { en: 'Ashford International', ar: 'مدرسة آشفورد الدولية' },
+    { en: 'Brightwater Academy', ar: 'أكاديمية برايتووتر' },
+    { en: 'Lakeside British School', ar: 'المدرسة البريطانية على البحيرة' },
+    { en: 'Hillcrest International', ar: 'مدرسة هيلكريست الدولية' },
+    { en: 'Meadowfield Academy', ar: 'أكاديمية ميدووفيلد' },
+    { en: 'Clearview School', ar: 'مدرسة كليرفيو' },
+    { en: 'Harborview International', ar: 'مدرسة هاربورفيو الدولية' },
+    { en: 'Stonegate Academy', ar: 'أكاديمية ستونغيت' },
+    { en: 'Foxfield School', ar: 'مدرسة فوكسفيلد' },
+    { en: 'Northgate International', ar: 'مدرسة نورثغيت الدولية' },
+    { en: 'Westbrook Academy', ar: 'أكاديمية ويستبروك' },
+    { en: 'Summitview School', ar: 'مدرسة سوميتفيو' },
+    { en: 'Parkside International', ar: 'مدرسة باركسايد الدولية' },
+    { en: 'Goldenfield Academy', ar: 'أكاديمية غولدنفيلد' },
+    { en: 'Silverwood School', ar: 'مدرسة سيلفروود' },
+    { en: 'Fernwood International', ar: 'مدرسة فيرنووود الدولية' },
+    { en: 'Brightfield Academy', ar: 'أكاديمية برايتفيلد' },
+    { en: 'Thornwood School', ar: 'مدرسة ثورنووود' },
+    { en: 'Ivyfield International', ar: 'مدرسة إيفيفيلد الدولية' },
+    { en: 'Brookside Academy', ar: 'أكاديمية بروكسايد' },
+  ];
+  try {
+    const result = await pool.query('SELECT school_id FROM schools ORDER BY school_id');
+    const ids = result.rows.map(r => r.school_id);
+    for (let i = 0; i < ids.length; i++) {
+      const name = NAMES[i % NAMES.length];
+      const suffix = i >= NAMES.length ? ` ${Math.floor(i / NAMES.length) + 1}` : '';
+      await pool.query('UPDATE schools SET name_en = $1, name_ar = $2 WHERE school_id = $3',
+        [name.en + suffix, name.ar + suffix, ids[i]]);
+    }
+    res.json({ success: true, updated: ids.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(process.env.PORT || 3000, () => {
   console.log('Server running on port', process.env.PORT || 3000);
 });
