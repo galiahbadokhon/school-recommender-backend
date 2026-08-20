@@ -107,6 +107,7 @@ app.post('/recommend', async (req, res) => {
       return {
         school_id: school.school_id,
         name: school.name_en,
+        name_ar: school.name_ar,
         curriculum: school.curriculum,
         district: school.district,
         fees_min: school.fees_min,
@@ -340,7 +341,7 @@ app.put('/meetings/:meeting_id/cancel', async (req, res) => {
 app.get('/posts', async (req, res) => {
   const session_id = req.headers['x-session-id'];
   try {
-    const result = await pool.query(`SELECT p.*, s.name_en as school_name, s.curriculum, s.district FROM posts p JOIN schools s ON p.school_id = s.school_id ORDER BY p.created_at DESC`);
+    const result = await pool.query(`SELECT p.*, s.name_en as school_name, s.name_ar as school_name_ar, s.curriculum, s.district FROM posts p JOIN schools s ON p.school_id = s.school_id ORDER BY p.created_at DESC`);
     const posts = result.rows;
     if (!session_id) return res.json(posts.map(p => ({ ...p, liked: false })));
     const user_id = await getUserId(session_id);
