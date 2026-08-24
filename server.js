@@ -180,7 +180,7 @@ app.get('/me', async (req, res) => {
   const session_id = req.headers['x-session-id'];
   if (!session_id) return res.status(401).json({ error: 'No session' });
   try {
-    const result = await q('SELECT u.user_id, u.name, u.email, u.phone FROM sessions s JOIN users u ON s.user_id = u.user_id WHERE s.session_id = ? AND s.expires_at > NOW()', [session_id]);
+    const result = await q('SELECT u.user_id, u.name, u.email, u.phone, u.avatar FROM sessions s JOIN users u ON s.user_id = u.user_id WHERE s.session_id = ? AND s.expires_at > NOW()', [session_id]);
     if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid or expired session' });
     res.json(result.rows[0]);
   } catch (err) {
@@ -733,6 +733,53 @@ app.get('/admin/rename-schools', async (req, res) => {
         [name.en + suffix, name.ar + suffix, ids[i]]);
     }
     res.json({ success: true, updated: ids.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update profile (name + email)
+app.put('/me', async (req, res) => {
+  const session_id = req.headers['x-session-id'];
+  const { name, email } = req.body;
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    await q('UPDATE users SET name = ?, email = ? WHERE user_id = ?', [name, email, user_id]);
+    res.json({ success: true });
+  } catch (err) {
+    if (err.code === '23505') return res.status(400).json({ error: 'Email already in use' });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Change password
+app.put('/me/password', async (req, res) => {
+  const session_id = req.headers['x-session-id'];
+  const { current_password, new_password } = req.body;
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    const result = await q('SELECT password_hash FROM users WHERE user_id = ?', [user_id]);
+    const match = await bcrypt.compare(current_password, result.rows[0].password_hash);
+    if (!match) return res.status(400).json({ error: 'Current password is incorrect' });
+    const hash = await bcrypt.hash(new_password, 10);
+    await q('UPDATE users SET password_hash = ? WHERE user_id = ?', [hash, user_id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Save avatar (base64)
+app.put('/me/avatar', async (req, res) => {
+  const session_id = req.headers['x-session-id'];
+  const { avatar } = req.body;
+  try {
+    const user_id = await getUserId(session_id);
+    if (!user_id) return res.status(401).json({ error: 'Unauthorized' });
+    await q('UPDATE users SET avatar = ? WHERE user_id = ?', [avatar, user_id]);
+    res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
