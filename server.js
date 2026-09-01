@@ -38,6 +38,20 @@ app.get('/', (req, res) => {
   res.json({ message: 'School Recommender API is running!' });
 });
 
+app.post('/schools', async (req, res) => {
+  const { name_en, name_ar, curriculum, district, fees_min, fees_max, grades_offered, gender_policy, language } = req.body;
+  if (!name_en) return res.status(400).json({ error: 'name_en is required' });
+  try {
+    const result = await q(
+      'INSERT INTO schools (name_en, name_ar, curriculum, district, fees_min, fees_max, grades_offered, gender_policy, language) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING school_id',
+      [name_en, name_ar, curriculum, district, fees_min, fees_max, grades_offered, gender_policy || 'Mixed', language || 'English']
+    );
+    res.json({ success: true, school_id: result.rows[0].school_id });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/schools', async (req, res) => {
   try {
     const result = await pool.query('SELECT * FROM schools');
